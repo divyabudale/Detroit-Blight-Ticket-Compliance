@@ -1,0 +1,178 @@
+import pandas as pd
+import numpy as np
+
+#loading the train and test along withlatlons and address data
+train = pd.read_csv("train.csv", encoding = 'ISO-8859-1',usecols=["ticket_id","compliance","compliance_detail","fine_amount","judgment_amount","late_fee",
+ "hearing_date","ticket_issued_date","city","agency_name","disposition","violation_code","violation_street_name",
+"clean_up_cost","discount_amount"])
+test = pd.read_csv("test.csv", encoding = 'ISO-8859-1',usecols=["ticket_id","fine_amount","judgment_amount","late_fee",
+ "hearing_date","ticket_issued_date","city","agency_name","disposition","violation_code","violation_street_name",
+"clean_up_cost","discount_amount"])
+add = pd.read_csv("addresses.csv", encoding = 'ISO-8859-1')
+latlons = pd.read_csv("latlons.csv", encoding = 'ISO-8859-1')
+train['set'] = 'train'
+test['set'] = 'test'
+full = pd.concat([train,test])
+lat_add=latlons.join(add.set_index('address'), on='address')
+df=full.join(lat_add.set_index('ticket_id'),on='ticket_id')
+#remove not valid target values
+df=df[~df["compliance_detail"].isin(['not responsible by disposition','not responsible by pending judgment disposition'])]
+
+#replace NAN values in the city
+df['city']=df['city'].fillna('Detroit')
+
+#convert to date timex and extract data
+df["hearing_date"]=pd.DatetimeIndex(df["hearing_date"])
+df["ticket_issued_date"]=pd.DatetimeIndex(df["ticket_issued_date"])
+df["day_diff"]=(df["hearing_date"]-df["ticket_issued_date"]).dt.days
+
+df['hearing_month']=df["hearing_date"].dt.month
+df['hear_week']=df["hearing_date"].dt.weekday_name
+df['hearing_time']=df["hearing_date"].dt.time
+
+df['ticket_issued_month']=df["ticket_issued_date"].dt.month
+df['tic_week']=df["ticket_issued_date"].dt.weekday_name
+df['ticket_issued_time']=df["ticket_issued_date"].dt.time
+df=df.drop(['hearing_date','ticket_issued_date'],axis=1)
+
+#replace NAN values in month, time and weekday
+df.hearing_month.loc[df.hearing_month.isnull()]=df.hearing_month.mean().round()
+df.hearing_time.loc[df.hearing_time.isnull()]='Other'
+df.hear_week.loc[df.hear_week.isnull()]='Weekend'
+df.hear_week.loc[df['hear_week'].isin(['Saturday','Sunday'])]='Weekend'
+
+counts=df['ticket_issued_time'].value_counts()
+df.loc[df['ticket_issued_time'].isin(counts[counts < 100].to_frame().reset_index()['index']), 'ticket_issued_time'] = np.nan
+df.ticket_issued_time.loc[df.ticket_issued_time.isnull()]='Other'
+
+#convert the month into int
+df.hearing_month=df.hearing_month.astype('int')
+df.ticket_issued_month=df.ticket_issued_month.astype('int')
+df_copy=df.copy()
+
+#binning
+df.agency_name.loc[df['agency_name'].isin(['Detroit Police Department','Health Department','Neighborhood City Halls'])]='Other'
+df.city.loc[~df['city'].isin(['Detroit','DETROIT','detroit'])]='Other'
+df.city.loc[df['city'].isin(['Detroit','DETROIT','detroit'])]='Detriot'
+df.disposition.loc[df['disposition'].isin(['Responsible (Fine Waived) by Admis','Responsible by Dismissal'
+  ,'Responsible - Compl/Adj by Determi','Responsible - Compl/Adj by Default'
+  ,'Responsible (Fine Waived) by Deter'])]='Other'
+df.violation_code.loc[~df['violation_code'].isin(['9-1-36(a)','9-1-104','9-1-81(a)','22-2-88(b)','22-2-88'])]='Other'
+df.violation_street_name.loc[~df['violation_street_name'].isin(['SEVEN MILE','MCNICHOLS','LIVERNOIS','GRAND RIVER'
+,'WARREN','GRATIOT','FENKELL','ASBURY PARK','JOY RD','EVERGREEN','ASHTON'
+,'EIGHT MILE','WYOMING','ARCHDALE','GRAND BLVD' ,'GREENFIELD'  ,'OUTER DRIVE' 
+,'SCHAEFER' ,'PURITAN'  ,'CHICAGO'])]='Other'
+df.clean_up_cost.loc[df['clean_up_cost']>0.0]=1
+df.clean_up_cost.loc[df['clean_up_cost']==0.0]=0
+df.clean_up_cost=df.clean_up_cost.astype('object')
+df.discount_amount.loc[df['discount_amount']>0.0]=1
+df.discount_amount.loc[df['discount_amount']==0.0]=0
+df.discount_amount=df.discount_amount.astype('object')
+
+# impute missing values in lat with the average, lon with the average
+mean_lat = df['lat'].mean()
+mean_lon = df['lon'].mean()
+df['lat'].fillna(mean_lat, inplace = True)
+df['lon'].fillna(mean_lon, inplace = True)
+
+from math import radians, cos, sin, asin, sqrt
+# create the distance of every address to the city of Detroit
+def haversine(lon1, lat1, lon2, lat2):
+
+# convert decimal degrees to radians
+lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+
+# haversine formula
+dlon = lon2 - lon1
+dlat = lat2 - lat1
+a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2) ** 2
+c = 2 * asin(sqrt(a))
+r = 6371 # radius of earth in kilometers (use 3956 for miles)
+return c * r
+
+# longitude and latitude of Detroit are -83.045753 and 42.331429
+df['distance'] = df.apply(lambda row: haversine(lon1 = -83.045753,
+  lat1 = 42.331429,
+  lon2 = row['lon'],
+  lat2 = row['lat']), axis = 1)
+
+from sklearn.preprocessing import MinMaxScaler
+scaler=MinMaxScaler()
+df["fine_amount"] = scaler.fit_transform(df["fine_amount"])
+df["judgment_amount"] = scaler.fit_transform(df["judgment_amount"])
+df["late_fee"] = scaler.fit_transform(df["late_fee"])
+
+#use only the below features for training the model
+df=df[["compliance","set","fine_amount","judgment_amount","late_fee","hearing_month","ticket_issued_month"
+   ,"city","agency_name","disposition","violation_code","hearing_time","ticket_issued_time",
+  "violation_street_name","clean_up_cost","discount_amount","distance","hear_week","tic_week"]]
+   
+#conevrt set into category  
+df['set'] = df['set'].astype('category')
+   
+#convert catgeorical variable into dummy
+categorical_feature = []
+#loop each column
+for i in range(df.shape[1]):
+#if column datatype is object/categorical
+if df[df.columns[i]].dtype == 'object':
+categorical_feature.append(df.columns[i])
+
+#convert to dummy variables
+df = pd.get_dummies(data=df,columns=categorical_feature) 
+
+#convert target into category  
+df['compliance'] = df['compliance'].astype('category')
+
+#seperate train and test
+train=df[df['set']=='train']
+test=df[df['set']=='test']
+train=train.drop(['set'],axis=1)
+test=test.drop(['set'],axis=1)
+
+
+#handle imbalanced dataset
+from sklearn.utils import resample
+# Separate majority and minority classes
+df_majority = train[train.compliance==0.0]
+df_minority = train[train.compliance==1.0]
+# Upsample minority class
+df_minority_upsampled = resample(df_minority, 
+ replace=True, # sample with replacement
+ n_samples=137000,# to match majority class
+ random_state=123) # reproducible results
+ 
+# Combine majority class with upsampled minority class
+train = pd.concat([df_majority, df_minority_upsampled])
+ 
+
+
+#Seperate the input and ouput variable
+y = train['compliance']
+X = train.iloc[:,1:]
+
+#Random Forest
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_curve, auc
+from sklearn.preprocessing import MinMaxScaler
+X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
+rf = RandomForestClassifier(random_state=1, n_estimators=110, min_samples_split=5, min_samples_leaf=1,max_depth=16)
+clf=rf.fit(X_train, y_train)
+
+
+#accuracy and auc
+#print('Train acuracy:',clf.score(X_train,y_train))
+#print('Test acuracy:',clf.score(X_test,y_test))
+y_score = clf.predict_proba(X_test)[:,1]
+fpr, tpr, _ = roc_curve(y_test, y_score)
+auc_test=auc(fpr,tpr)
+#print ('Area under curve (AUC): ', auc(fpr,tpr))
+
+#prediction
+Xtest = test.iloc[:,1:]
+tid=df_copy[df_copy['set']=='test'].ticket_id
+tid=list(tid)
+prob=clf.predict_proba(Xtest)[:,1]
+prob=list(prob)
+compliance=pd.Series(prob,index=tid)
